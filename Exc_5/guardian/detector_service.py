@@ -19,26 +19,50 @@ from model import BearingModel
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--name", default="det-1", help="instance name (shows up in the scoreboard)")
-ap.add_argument("--in-topic", default=None, help="TODO: the topic your gateways write to")
-ap.add_argument("--group", default=None, help="TODO: the consumer group of this detector")
+ap.add_argument("--in-topic", default="readings", help="the topic the gateways write to")
+ap.add_argument("--group", default="line-guardian", help="the consumer group of this detector")
 ap.add_argument("--out-topic", default="anomalies")
 ap.add_argument("--bootstrap", default="localhost:9092")
 args = ap.parse_args()
-if not args.in_topic or not args.group:
-    raise SystemExit("TODO: set --in-topic and --group (or give them defaults above)")
 
 model = BearingModel(instance=args.name)
 consumer = Consumer({
     "bootstrap.servers": args.bootstrap,
     "group.id": args.group,
     "client.id": args.name,
-    "auto.offset.reset": "latest",     # TODO: why "latest" and not "earliest" for a live detector?
+    # "latest": a live detector only processes new readings. "earliest" would
+    # replay the whole topic on a fresh group and make the detector fall behind.
+    "auto.offset.reset": "latest",
 })
 producer = Producer({
     "bootstrap.servers": args.bootstrap,
-    # TODO: more settings?
+    "client.id": args.name,
+    "acks": "all",
+    "enable.idempotence": True,
+    "linger.ms": 5,
+    "compression.type": "lz4",
 })
-consumer.subscribe([args.in_topic])
+
+# Which machines we have seen on which partition. A machine's readings all go
+# to one partition (key = machine_id), so this maps 1:1. On revoke we forget
+# the machines of that partition: if the partition later comes back to this
+# instance, the model must not remember a stale next_seq (that would count
+# readings as missing).
+partition_machines = {}
+
+
+def on_assign(_consumer, partitions):
+    for tp in partitions:
+        partition_machines.setdefault(tp.partition, set())
+
+
+def on_revoke(_consumer, partitions):
+    for tp in partitions:
+        for mid in partition_machines.pop(tp.partition, set()):
+            model.forget(mid)
+
+
+consumer.subscribe([args.in_topic], on_assign=on_assign, on_revoke=on_revoke, on_lost=on_revoke)
 print(f"[{args.name}] {args.in_topic} -> {args.out_topic} (Ctrl+C to stop)", flush=True)
 
 readings = anomalies = 0
@@ -52,12 +76,15 @@ try:
             print(f"[{args.name}] {msg.error()}")
             continue
         reading = json.loads(msg.value())
+        partition_machines.setdefault(msg.partition(), set()).add(reading["machine_id"])
         score = model.score(reading)
         readings += 1
         if score is not None and score >= model.threshold:
             anomalies += 1
             event = model.anomaly_event(reading, score)
-            producer.produce(args.out_topic, key=None,       # TODO: which key?
+            # key = machine_id: all anomalies of a machine land in the same
+            # partition, in order, for the maintenance team.
+            producer.produce(args.out_topic, key=reading["machine_id"],
                              value=json.dumps(event))
         producer.poll(0)
         if time.time() >= report_at:
