@@ -6,15 +6,7 @@ Answer: The missing readings are in the table: SELECT count(*) for the run retur
 
 *Question 2:* With the full plant running, what happens to delay, backlog and missing, and why?
 
-Answer: The model needs 3 ms per reading. At 600 readings per second that is 1.8 seconds of work for every second that passes. One detector can only process about 333 readings per second.
-
-backlog keeps growing, by roughly 270 rows per second. After 60 s it was about [X].
-delay keeps growing as well, because new readings wait behind the backlog. It reached about [Y] s, far above the 5 s limit.
-missing [grew / your observation]. The commit-order problem from Question 1 gets worse with more gateways writing at once.
-
-After the plant stops, the detector only works through its backlog.
-
-Two separate problems: one detector is too slow (a capacity problem), and polling by id loses rows (a correctness problem).
+Answer: With the full plant (60 machines, 600 readings/s), the detector can no longer keep up. The model costs 3 ms per reading, so one detector can process at most about 333 readings/s, and I measured roughly 400/s. The plant produces 600/s, so the backlog grows continuously: 911 rows after about 5 s, 2,984 after 10 s, 4,780 after 15 s and 6,560 after 20 s. The delay grows with it: 1.5 s, 5.1 s, 7.9 s and 11.0 s, so the 5 s limit (R3) is exceeded after about 10 s and keeps getting worse. Missing reached 99 early and then stayed at 99. The gaps appear while the detector is polling right at the head of the table, where rows are still committing out of order. When the detector lags behind, it reads old, fully committed rows and skips almost nothing. After the plant stops, the detector only works through its backlog. This shows two separate problems: one detector is too slow (capacity), and polling by id loses rows (correctness).
 **Stage B: Decision record**
 *Question 3:* Compare the two options against the requirements. Which does each meet, and which are at risk?
 
